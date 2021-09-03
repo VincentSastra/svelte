@@ -204,7 +204,7 @@ export interface CrossfadeParams {
 	easing?: EasingFunction;
 }
 
-type ClientRectMap = Map<any, { rect: ClientRect }>;
+type ClientRectMap = Map<any, Element>;
 
 export function crossfade({ fallback, ...defaults }: CrossfadeParams & {
 	fallback?: (node: Element, params: CrossfadeParams, intro: boolean) => TransitionConfig;
@@ -212,7 +212,26 @@ export function crossfade({ fallback, ...defaults }: CrossfadeParams & {
 	const to_receive: ClientRectMap = new Map();
 	const to_send: ClientRectMap = new Map();
 
-	function crossfade(from: ClientRect, node: Element, params: CrossfadeParams): TransitionConfig {
+	// To calculate the opacity to make the top element and bottom element blend linearly
+	function alphablend(to: number, from: number, t: number) {
+		const retval: {to: number, from: number} = {to: -1, from: -1};
+		const targetOpacity = ( to - from ) * t + from;
+
+		// Based on the blending formula here. (http://en.wikipedia.org/wiki/Alpha_compositing#Alpha_blending)
+		// This is a quadratic blending function that makes the top layer and bottom layer blend linearly.
+		// However there is an asymptote at target=1 so that needs to be handled with an if else statement.
+		if ( targetOpacity === 1 ) {
+			retval.to = t;
+			retval.from = 1;
+		} else {
+			retval.from = targetOpacity - ( t * t * targetOpacity );
+			retval.to = ( targetOpacity - retval.from ) / ( 1 - retval.from );
+		}
+
+		return retval;
+	}
+
+	function crossfade(otherNode: Element, node: Element, params: CrossfadeParams, toDirection: boolean): TransitionConfig {
 		const {
 			delay = 0,
 			duration = d => Math.sqrt(d) * 30,
@@ -220,6 +239,7 @@ export function crossfade({ fallback, ...defaults }: CrossfadeParams & {
 		} = assign(assign({}, defaults), params);
 
 		const to = node.getBoundingClientRect();
+		const from = otherNode.getBoundingClientRect();
 		const dx = from.left - to.left;
 		const dy = from.top - to.top;
 		const dw = from.width / to.width;
@@ -228,32 +248,35 @@ export function crossfade({ fallback, ...defaults }: CrossfadeParams & {
 
 		const style = getComputedStyle(node);
 		const transform = style.transform === 'none' ? '' : style.transform;
-		const opacity = +style.opacity;
+
+		const otherStyle = getComputedStyle(otherNode);
+
+		const toOpacity = toDirection ? +style.opacity : +otherStyle.opacity;
+		const fromOpacity = toDirection ? +otherStyle.opacity : +style.opacity;
 
 		return {
 			delay,
 			duration: is_function(duration) ? duration(d) : duration,
 			easing,
 			css: (t, u) => `
-				opacity: ${t * opacity};
+				opacity: ${toDirection ? alphablend(toOpacity, fromOpacity, t).to
+							: alphablend(toOpacity, fromOpacity, 1 - t).from};
 				transform-origin: top left;
 				transform: ${transform} translate(${u * dx}px,${u * dy}px) scale(${t + (1 - t) * dw}, ${t + (1 - t) * dh});
 			`
 		};
 	}
 
-	function transition(items: ClientRectMap, counterparts: ClientRectMap, intro: boolean) {
+	function transition(items: ClientRectMap, counterparts: ClientRectMap, intro: boolean, toDirection: boolean) {
 		return (node: Element, params: CrossfadeParams & { key: any }) => {
-			items.set(params.key, {
-				rect: node.getBoundingClientRect()
-			});
+			items.set(params.key, node);
 
 			return () => {
 				if (counterparts.has(params.key)) {
-					const { rect } = counterparts.get(params.key);
+					const counterpartNode = counterparts.get(params.key);
 					counterparts.delete(params.key);
 
-					return crossfade(rect, node, params);
+					return crossfade(counterpartNode, node, params, toDirection);
 				}
 
 				// if the node is disappearing altogether
@@ -266,7 +289,7 @@ export function crossfade({ fallback, ...defaults }: CrossfadeParams & {
 	}
 
 	return [
-		transition(to_send, to_receive, false),
-		transition(to_receive, to_send, true)
+		transition(to_send, to_receive, false, false),
+		transition(to_receive, to_send, true, true)
 	];
 }
